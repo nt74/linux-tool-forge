@@ -6,6 +6,13 @@
 #include <cstdlib>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <cstring> // Add this header for memcpy
+#include <ctime>
+#include <getopt.h> // For command line arguments
 
 struct SSHConfig {
     std::string hostname;
@@ -13,10 +20,19 @@ struct SSHConfig {
     int port;
 };
 
+// Function to log messages to a log file
+void logMessage(const std::string &message) {
+    std::ofstream logFile("ssh_waypipe.log", std::ios_base::app);
+    std::time_t now = std::time(nullptr);
+    logFile << std::ctime(&now) << ": " << message << std::endl;
+}
+
+// Function to display help message
 void showHelp() {
     std::cout << "Usage: ssh_waypipe [OPTIONS]\n"
               << "Options:\n"
               << "  -h, --help             Show this help message and exit\n"
+              << "  -c, --config FILE      Specify the configuration file\n"
               << "\nDescription:\n"
               << "  This binary SSHs to a remote host using the 'waypipe' command to enable remote Wayland applications.\n"
               << "\nConfiguration File:\n"
@@ -26,11 +42,13 @@ void showHelp() {
               << "    port=your_port\n";
 }
 
+// Function to read and parse the configuration file
 SSHConfig readConfig(const std::string& filepath) {
     SSHConfig config;
     std::ifstream configFile(filepath);
     if (!configFile.is_open()) {
         std::cerr << "Error opening config file: " << filepath << std::endl;
+        logMessage("Error opening config file: " + filepath);
         exit(EXIT_FAILURE);
     }
 
@@ -46,64 +64,116 @@ SSHConfig readConfig(const std::string& filepath) {
                 } else if (key == "username") {
                     config.username = value;
                 } else if (key == "port") {
-                    config.port = std::stoi(value);
+                    try {
+                        config.port = std::stoi(value);
+                    } catch (const std::invalid_argument& e) {
+                        std::cerr << "Invalid port value in config file" << std::endl;
+                        logMessage("Invalid port value in config file");
+                        exit(EXIT_FAILURE);
+                    }
                 }
             }
         }
     }
     configFile.close();
+
+    if (config.hostname.empty() || config.username.empty() || config.port <= 0) {
+        std::cerr << "Configuration file is missing required fields" << std::endl;
+        logMessage("Configuration file is missing required fields");
+        exit(EXIT_FAILURE);
+    }
+
     return config;
 }
 
-bool isHostUp(const std::string& hostname) {
-    std::stringstream ss;
-    ss << "ping -c 1 " << hostname << " > /dev/null 2>&1";
-    int result = std::system(ss.str().c_str());
+// Function to check if the host is up
+bool isHostUp(const std::string& hostname, int port) {
+    struct sockaddr_in sa;
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        std::cerr << "Error creating socket" << std::endl;
+        logMessage("Error creating socket");
+        return false;
+    }
+
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    struct hostent* host = gethostbyname(hostname.c_str());
+    if (!host) {
+        std::cerr << "Error resolving hostname: " << hostname << std::endl;
+        logMessage("Error resolving hostname: " + hostname);
+        close(sock);
+        return false;
+    }
+
+    std::memcpy(&sa.sin_addr, host->h_addr, host->h_length);
+
+    int result = connect(sock, (struct sockaddr*)&sa, sizeof(sa));
+    close(sock);
     return result == 0;
 }
 
+// Function to execute the waypipe command
 void executeWaypipe(const SSHConfig& config) {
     std::stringstream ss;
-    ss << "waypipe ssh " << config.username << "@" << config.hostname << " -p " << config.port;
+    ss << "waypipe ssh -p " << config.port << " " << config.username << "@" << config.hostname;
     std::string command = ss.str();
     std::cout << "Executing command: " << command << std::endl;
+    logMessage("Executing command: " + command);
     int result = std::system(command.c_str());
     if (result != 0) {
         std::cerr << "Failed to execute waypipe command" << std::endl;
+        logMessage("Failed to execute waypipe command");
     }
 }
 
 int main(int argc, char *argv[]) {
-    if (argc > 1) {
-        std::string arg = argv[1];
-        if (arg == "-h" || arg == "--help") {
+    std::string configFilePath;
+
+    // Command-line options
+    struct option long_options[] = {
+        {"help", no_argument, 0, 'h'},
+        {"config", required_argument, 0, 'c'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "hc:", long_options, NULL)) != -1) {
+        switch (opt) {
+        case 'h':
             showHelp();
             return 0;
-        } else {
-            std::cerr << "Unknown option: " << arg << "\n";
+        case 'c':
+            configFilePath = optarg;
+            break;
+        default:
             showHelp();
             return 1;
         }
     }
 
-    std::string homeDir = std::getenv("HOME");
-    std::string configDir = homeDir + "/.config/ssh_waypipe";
-    std::string configPath = configDir + "/ssh_waypipe.conf";
+    if (configFilePath.empty()) {
+        std::string homeDir = std::getenv("HOME");
+        std::string configDir = homeDir + "/.config/ssh_waypipe";
+        configFilePath = configDir + "/ssh_waypipe.conf";
 
-    // Ensure the config directory exists
-    struct stat st;
-    if (stat(configDir.c_str(), &st) != 0) {
-        if (mkdir(configDir.c_str(), 0700) != 0) {
-            std::cerr << "Error creating config directory: " << configDir << std::endl;
-            exit(EXIT_FAILURE);
+        // Ensure the config directory exists
+        struct stat st;
+        if (stat(configDir.c_str(), &st) != 0) {
+            if (mkdir(configDir.c_str(), 0700) != 0) {
+                std::cerr << "Error creating config directory: " << configDir << std::endl;
+                logMessage("Error creating config directory: " + configDir);
+                exit(EXIT_FAILURE);
+            }
         }
     }
 
-    SSHConfig config = readConfig(configPath);
-    
+    SSHConfig config = readConfig(configFilePath);
+
     // Check if the host is up
-    if (!isHostUp(config.hostname)) {
+    if (!isHostUp(config.hostname, config.port)) {
         std::cerr << "The host " << config.hostname << " is down. Exiting." << std::endl;
+        logMessage("The host " + config.hostname + " is down. Exiting.");
         exit(EXIT_FAILURE);
     }
 
