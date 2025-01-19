@@ -10,9 +10,9 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <cstring> // Add this header for memcpy
+#include <cstring>
 #include <ctime>
-#include <getopt.h> // For command line arguments
+#include <getopt.h>
 
 struct SSHConfig {
     std::string hostname;
@@ -86,30 +86,12 @@ SSHConfig readConfig(const std::string& filepath) {
     return config;
 }
 
-// Function to check if the host is up
+// Function to check if the host is up using ncat
 bool isHostUp(const std::string& hostname, int port) {
-    struct sockaddr_in sa;
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        std::cerr << "Error creating socket" << std::endl;
-        logMessage("Error creating socket");
-        return false;
-    }
-
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(port);
-    struct hostent* host = gethostbyname(hostname.c_str());
-    if (!host) {
-        std::cerr << "Error resolving hostname: " << hostname << std::endl;
-        logMessage("Error resolving hostname: " + hostname);
-        close(sock);
-        return false;
-    }
-
-    std::memcpy(&sa.sin_addr, host->h_addr, host->h_length);
-
-    int result = connect(sock, (struct sockaddr*)&sa, sizeof(sa));
-    close(sock);
+    std::stringstream ss;
+    ss << "ncat -z -v " << hostname << " " << port << " > /dev/null 2>&1";
+    std::string command = ss.str();
+    int result = std::system(command.c_str());
     return result == 0;
 }
 
